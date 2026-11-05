@@ -1,7 +1,9 @@
 # Go2 ROS2 Toolbox（中文说明）
 
 
-> 本文件为[英文原版 README](./README.md)的中文翻译，若有疑问请参考原文。
+> ⚠️ **本文件是上游原版（Foxy 时代）说明的中文翻译，内容已过时。**
+> 本仓库已适配 Ubuntu 22.04 + ROS2 Humble + CycloneDDS，正确的话题、依赖、编译与运行方式请
+> 以 [README.md](./README.md) 为准；改动细节见 [CHANGES_AND_TEST.md](./CHANGES_AND_TEST.md)。
 
 [![ROS2](https://img.shields.io/badge/ROS2-Foxy-green.svg)](https://docs.ros.org/en/foxy/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

@@ -49,7 +49,7 @@
 #include <utility>
 
 #include "sensor_msgs/point_cloud2_iterator.hpp"
-#include "tf2_sensor_msgs/tf2_sensor_msgs.h"
+#include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include "tf2_ros/create_timer_ros.h"
 #include "tf2/LinearMath/Transform.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
@@ -82,86 +82,43 @@ PointCloudToLaserScanNode::PointCloudToLaserScanNode(const rclcpp::NodeOptions &
 
   pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", qos);
 
-  robot_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-  "/utlidar/robot_pose", 10, 
-  std::bind(&PointCloudToLaserScanNode::robotPoseCallback, this, std::placeholders::_1)
-  );
-
   using std::placeholders::_1;
-  // if pointcloud target frame specified, we need to filter by transform availability
+
+  // 直接订阅一次：原实现用线程每 100ms 无条件重建订阅（守卫被注释），容易丢消息。
+  sub_.registerCallback(
+    std::bind(&PointCloudToLaserScanNode::cloudCallback, this, _1));
+
+  // 需要做坐标变换时创建 TF 监听器。
+  // 不再使用 MessageFilter：机器人时间戳与主机差数百天，MessageFilter 会一直
+  // 等到天荒地老也等不到对应时刻的 TF，因此改为在回调里用主机 now() 查询。
   if (!target_frame_.empty()) {
     tf2_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     auto timer_interface = std::make_shared<tf2_ros::CreateTimerROS>(
       this->get_node_base_interface(), this->get_node_timers_interface());
     tf2_->setCreateTimerInterface(timer_interface);
     tf2_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf2_);
-    message_filter_ = std::make_unique<MessageFilter>(
-      sub_, *tf2_, target_frame_, input_queue_size_,
-      this->get_node_logging_interface(),
-      this->get_node_clock_interface());
-    message_filter_->registerCallback(
-      std::bind(&PointCloudToLaserScanNode::cloudCallback, this, _1));
-  } else {  // otherwise setup direct subscription
-    sub_.registerCallback(std::bind(&PointCloudToLaserScanNode::cloudCallback, this, _1));
   }
 
-  subscription_listener_thread_ = std::thread(
-    std::bind(&PointCloudToLaserScanNode::subscriptionListenerThreadLoop, this));
+  rclcpp::SensorDataQoS input_qos;
+  input_qos.keep_last(input_queue_size_);
+  input_qos.reliable();
+  sub_.subscribe(this, "cloud_in", input_qos.get_rmw_qos_profile());
 }
 
 PointCloudToLaserScanNode::~PointCloudToLaserScanNode()
 {
-  alive_.store(false);
-  subscription_listener_thread_.join();
-}
-
-void PointCloudToLaserScanNode::subscriptionListenerThreadLoop()
-{
-  rclcpp::Context::SharedPtr context = this->get_node_base_interface()->get_context();
-
-  const std::chrono::milliseconds timeout(100);
-  while (rclcpp::ok(context) && alive_.load()) {
-    // int subscription_count = pub_->get_subscription_count() +
-    //   pub_->get_intra_process_subscription_count();
-    // if (subscription_count > 0) {
-    //   if (!sub_.getSubscriber()) {
-    //     RCLCPP_INFO(
-    //       this->get_logger(),
-    //       "Got a subscriber to laserscan, starting pointcloud subscriber");
-    //     rclcpp::SensorDataQoS qos;
-    //     qos.keep_last(input_queue_size_);
-    //     qos.reliable();
-    //     sub_.subscribe(this, "cloud_in", qos.get_rmw_qos_profile());
-    //   }
-    // } else if (sub_.getSubscriber()) {
-    //   RCLCPP_INFO(
-    //     this->get_logger(),
-    //     "No subscribers to laserscan, shutting down pointcloud subscriber");
-    //   sub_.unsubscribe();
-    // }
-
-    rclcpp::SensorDataQoS qos;
-    qos.keep_last(input_queue_size_);
-    qos.reliable();
-    sub_.subscribe(this, "cloud_in", qos.get_rmw_qos_profile());
-    rclcpp::Event::SharedPtr event = this->get_graph_event();
-    this->wait_for_graph_change(event, timeout);
-  }
-  sub_.unsubscribe();
-}
-
-void PointCloudToLaserScanNode::robotPoseCallback(geometry_msgs::msg::PoseStamped::SharedPtr msg)
-{
-  // 在这里处理robot_pose消息
-  pose_stamped = *msg;
 }
 
 void PointCloudToLaserScanNode::cloudCallback(
   sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg)
 {
   // build laserscan output
+  // 统一用主机时钟：机器人时间戳与主机不同步（bag 中差 568 天），
+  // 而 TF（go2_base）与下游 slam/nav2 都用主机时间，这里显式覆盖。
+  const rclcpp::Time stamp = this->now();
   auto scan_msg = std::make_unique<sensor_msgs::msg::LaserScan>();
   scan_msg->header = cloud_msg->header;
+  scan_msg->header.stamp = stamp;
   if (!target_frame_.empty()) {
     scan_msg->header.frame_id = target_frame_;
   }
@@ -186,14 +143,20 @@ void PointCloudToLaserScanNode::cloudCallback(
   }
 
   // Transform cloud if necessary
+  // 用“最新可用变换”而不是按消息时间戳查：机器人时钟比主机慢数百天，
+  // 且 now() 可能略早于刚收到的 TF，按时间戳查会报 extrapolation into the past。
   if (scan_msg->header.frame_id != cloud_msg->header.frame_id) {
-    std::cout << "Transforming point cloud from " << cloud_msg->header.frame_id << " to " << scan_msg->header.frame_id << std::endl;
     try {
+      sensor_msgs::msg::PointCloud2 cloud_in = *cloud_msg;
+      cloud_in.header.stamp = stamp;
+      const geometry_msgs::msg::TransformStamped tf_msg =
+        tf2_->lookupTransform(target_frame_, cloud_in.header.frame_id, tf2::TimePointZero);
       auto cloud = std::make_shared<sensor_msgs::msg::PointCloud2>();
-      tf2_->transform(*cloud_msg, *cloud, target_frame_, tf2::durationFromSec(tolerance_));
+      tf2::doTransform(cloud_in, *cloud, tf_msg);
       cloud_msg = cloud;
     } catch (tf2::TransformException & ex) {
-      RCLCPP_ERROR_STREAM(this->get_logger(), "Transform failure: " << ex.what());
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000, "Transform failure: %s", ex.what());
       return;
     }
   }

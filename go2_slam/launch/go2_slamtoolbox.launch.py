@@ -23,7 +23,9 @@ def generate_launch_description():
             os.path.join(slam_toolbox_dir, 'launch', 'online_async_launch.py')
         ]),
         launch_arguments={
-            'params_file': slam_toolbox_config,
+            # Humble 的 slam_toolbox launch 参数名是 slam_params_file（Foxy 时代叫 params_file，
+            # 传错名字会被静默忽略、回落到 slam_toolbox 默认参数）
+            'slam_params_file': slam_toolbox_config,
             'use_sim_time': 'false',
         }.items(),
     )

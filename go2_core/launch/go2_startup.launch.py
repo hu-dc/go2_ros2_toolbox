@@ -25,9 +25,11 @@ def generate_launch_description():
             os.path.join(go2_core_dir, 'launch', 'go2_base.launch.py')
         ]),
         launch_arguments={
-            'video_enable': 'true',
+            # 相机链路暂关闭：video_stream_node 的 GStreamer 组播网卡写死 eth0，
+            # 本机是 ens33/ens37，直接开会在启动时报错刷屏。相机验证时再单独打开并改网卡。
+            'video_enable': 'false',
             'image_topic': '/camera/image_raw',
-            'tcp_enable': 'true',
+            'tcp_enable': 'false',
             'tcp_host': '127.0.0.1',
             'tcp_port': '5432',
             'target_fps': '30',
